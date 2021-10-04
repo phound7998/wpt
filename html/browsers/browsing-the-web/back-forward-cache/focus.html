@@ -1,0 +1,84 @@
+<!DOCTYPE HTML>
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<script src="/common/utils.js"></script>
+<script src="/common/dispatcher/dispatcher.js"></script>
+<script src="resources/helper.sub.js"></script>
+<script>
+// https://github.com/whatwg/html/issues/5878
+promise_test(async t => {
+  const pageA = new RemoteContext(token());
+  const pageB = new RemoteContext(token());
+
+  const urlA = executorPath + pageA.context_id +
+               '&events=pagehide,pageshow,load';
+  const urlB = originCrossSite + executorPath + pageB.context_id;
+
+  window.open(urlA, '_blank', 'noopener');
+
+  await pageA.execute_script(waitForPageShow);
+  await pageA.execute_script(
+    (url) => {
+      // searchParams part of `url` (i.e. `uuid=` param) is passed via <input>,
+      // while other parts are via <form action>.
+      url = new URL(url);
+      const targetId = url.searchParams.get('uuid');
+      url.search = '';
+
+      const form = document.createElement('form');
+      form.setAttribute('action', url.href);
+
+      const idInput = document.createElement('input');
+      idInput.setAttribute('type', 'text');
+      idInput.setAttribute('name', 'uuid');
+      idInput.setAttribute('value', targetId);
+      form.appendChild(idInput);
+
+      const textInput = document.createElement('input');
+      textInput.setAttribute('type', 'text');
+      textInput.onfocus = () => {
+        recordEvent('input.focus');
+      };
+      textInput.onblur = () => {
+        recordEvent('input.blur');
+      };
+      form.appendChild(textInput);
+
+      document.body.appendChild(form);
+
+      textInput.focus();
+
+      prepareNavigation(() => {
+        form.submit();
+      });
+    },
+    [urlB]
+  );
+
+  await pageB.execute_script(waitForPageShow);
+  await pageB.execute_script(
+    () => {
+      prepareNavigation(() => { history.back(); });
+    }
+  );
+
+  await pageA.execute_script(waitForPageShow);
+  await assert_bfcached(pageA);
+
+  assert_true(
+    await pageA.execute_script(() => {
+        return document.activeElement === document.querySelector("input");
+    }),
+    'Should be focused');
+
+  assert_array_equals(
+    await pageA.execute_script(() => getRecordedEvents()),
+    [
+      'input.focus',
+      'window.load',
+      'window.pageshow',
+      'window.pagehide.persisted',
+      'window.pageshow.persisted'
+    ]);
+}, 'Focus restored on BFCached navigation');
+</script>
