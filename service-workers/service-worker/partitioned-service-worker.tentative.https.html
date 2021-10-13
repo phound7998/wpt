@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<meta charset="utf-8"/>
+<title>Service Worker: Partitioned Service Workers</title>
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<script src="resources/test-helpers.sub.js"></script>
+<script src="/common/get-host-info.sub.js"></script>
+
+
+<body>
+  The 3p iframe's postMessage:
+  <p id="iframe_response">No message received</p>
+
+<script>
+
+var message_event_promise_resolve = null;
+
+function messageEventHandler(evt) {
+  if(message_event_promise_resolve) {
+    local_resolve = message_event_promise_resolve;
+    message_event_promise_resolve = null;
+    local_resolve(evt.data);
+  }
+}
+
+function makeMessagePromise() {
+  if(message_event_promise_resolve != null) {
+    // Do not create a new promise until the previous is settled.
+    return;
+  }
+
+  return new Promise(resolve => {
+    message_event_promise_resolve = resolve;
+  });
+}
+
+promise_test(async t => {
+  const script = './resources/partitioned-storage-sw.js'
+  const scope = './resources/partitioned-'
+
+  // Add service worker to this 1P context.
+  const reg = await service_worker_unregister_and_register(t, script, scope);
+  t.add_cleanup(() => reg.unregister());
+  await wait_for_state(t, reg.installing, 'activated');
+
+  // Open an iframe that will wait on the SW's Promise.
+  // The query param is there to make it easier to debug which request the
+  // service worker is handling.
+  const popup_url_wait = new URL(
+    './resources/partitioned-waitUntilResolved.fakehtml?FromTest',
+    self.location);
+  await with_iframe(popup_url_wait);
+
+  // Now create a 3p iframe that will try to resolve the SW in a 3p context.
+  const third_party_origin = new URL(
+    './resources/partitioned-service-worker-third-party-window.html',
+    get_host_info().HTTPS_NOTSAMESITE_ORIGIN + self.location.pathname);
+
+  // Set up the message handler.
+  self.addEventListener('message', messageEventHandler);
+  t.add_cleanup(() =>{
+    self.removeEventListener('message', messageEventHandler, false);
+  });
+
+  // We'll wait on a postMessage from the 3p to know if it's done.
+  const message_promise_3p = makeMessagePromise();
+
+  // Create the 3p window (which will in turn create the iframe with the SW).
+  const w = window.open(third_party_origin);
+  t.add_cleanup(() => w.close());
+
+  // Wait on the promise and store its data.
+  var iframe_3p_data;
+  await message_promise_3p.then(data => {
+    document.getElementById("iframe_response").innerHTML =
+      "3p iframe's has_pending: " + data.has_pending + " source: " +
+      data.source + ". ";
+    iframe_3p_data = data;
+  });
+
+  // Now do the same for the 1p iframe.
+  const message_promise_1p = makeMessagePromise();
+
+  // Resolve the SW's Promise from a 1p context.
+  const popup_url_resolve = new URL(
+    './resources/partitioned-resolve.fakehtml?FromTest', self.location);
+
+  const frame_resolve = with_iframe(popup_url_resolve);
+
+  var iframe_1p_data;
+  await message_promise_1p.then(data => {
+    document.getElementById("iframe_response").innerHTML +=
+      "1p iframe's has_pending: " + data.has_pending + " source: " +
+      data.source;
+    iframe_1p_data = data;
+    });
+
+    return frame_resolve.then(() => {
+    // If partitioning is working correctly then only the 1p iframe should see
+    // (and resolve) its promise.
+    assert_true(iframe_1p_data.has_pending,
+      "The 1p iframe saw a pending promise in the service worker.");
+    assert_false(iframe_3p_data.has_pending,
+      "The 3p iframe saw a pending promise in the service worker.");
+  });
+
+}, 'Services workers under different top-level sites are partitioned.');
+
+</script>
+</body>
